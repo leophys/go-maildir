@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"math/rand"
 	"os"
 	"path/filepath"
@@ -39,7 +38,7 @@ func cat(t *testing.T, path string) string {
 		t.Fatal(err)
 	}
 	defer f.Close()
-	c, err := ioutil.ReadAll(f)
+	c, err := io.ReadAll(f)
 	if err != nil {
 		t.Fatal(err)
 	}
