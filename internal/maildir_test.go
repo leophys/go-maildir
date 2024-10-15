@@ -1,4 +1,4 @@
-package maildir
+package internal
 
 import (
 	"errors"
