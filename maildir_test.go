@@ -7,6 +7,7 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -46,8 +47,8 @@ func cat(t *testing.T, path string) string {
 }
 
 // makeDelivery creates a new message
-func makeDelivery(tb testing.TB, d Dir, msg string) {
-	del, err := NewDelivery(string(d))
+func makeDelivery(tb testing.TB, d Dir, msg string, attrs Attributes) {
+	del, err := NewDelivery(string(d), attrs)
 	if err != nil {
 		tb.Fatal(err)
 	}
@@ -116,7 +117,7 @@ func TestDelivery(t *testing.T) {
 	defer cleanup(t, d)
 
 	var msg = "this is a message"
-	makeDelivery(t, d, msg)
+	makeDelivery(t, d, msg, nil)
 
 	msgs, err := d.Unseen()
 	if err != nil {
@@ -125,6 +126,39 @@ func TestDelivery(t *testing.T) {
 	path := msgs[0].Filename()
 	if !exists(path) {
 		t.Fatal("File doesn't exist")
+	}
+
+	if cat(t, path) != msg {
+		t.Fatal("Content doesn't match")
+	}
+}
+
+func TestDeliveryWithAttributes(t *testing.T) {
+	t.Parallel()
+
+	var d Dir = "test_delivery_with_attrs"
+	err := d.Init()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup(t, d)
+
+	var msg = "this is a message"
+	makeDelivery(t, d, msg, Attributes(map[string]string{
+		"V": "123",
+		"A": "randomstring",
+	}))
+
+	msgs, err := d.Unseen()
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := msgs[0].Filename()
+	if !exists(path) {
+		t.Fatal("File doesn't exist")
+	}
+	if !strings.Contains(path, "A=randomstring,V=123") {
+		t.Fatal("File name missing attributes")
 	}
 
 	if cat(t, path) != msg {
@@ -143,7 +177,7 @@ func TestDir_Create(t *testing.T) {
 	defer cleanup(t, d)
 
 	var text = "this is a message"
-	msg, w, err := d.Create([]Flag{FlagFlagged})
+	msg, w, err := d.Create([]Flag{FlagFlagged}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -184,7 +218,7 @@ func TestPurge(t *testing.T) {
 	}
 	defer cleanup(t, d)
 
-	makeDelivery(t, d, "foo")
+	makeDelivery(t, d, "foo", nil)
 
 	msgs, err := d.Unseen()
 	if err != nil {
@@ -217,7 +251,7 @@ func TestMove(t *testing.T) {
 	defer cleanup(t, d2)
 
 	const msg = "a moving message"
-	makeDelivery(t, d1, msg)
+	makeDelivery(t, d1, msg, nil)
 	msgs, err := d1.Unseen()
 	if err != nil {
 		t.Fatal(err)
@@ -252,7 +286,7 @@ func TestCopy(t *testing.T) {
 	}
 	defer cleanup(t, d2)
 	const msg = "a moving message"
-	makeDelivery(t, d1, msg)
+	makeDelivery(t, d1, msg, nil)
 	msgs, err := d1.Unseen()
 	if err != nil {
 		t.Fatal(err)
@@ -293,7 +327,7 @@ func TestIllegal(t *testing.T) {
 	}
 	defer cleanup(t, d1)
 	const msg = "an illegal message"
-	makeDelivery(t, d1, msg)
+	makeDelivery(t, d1, msg, nil)
 	msgs, err := d1.Unseen()
 	if err != nil {
 		t.Fatal(err)
@@ -325,7 +359,7 @@ func TestFolderWithSquareBrackets(t *testing.T) {
 	}
 
 	key := func() string {
-		msg, writer, err := dir.Create([]Flag{FlagPassed, FlagReplied})
+		msg, writer, err := dir.Create([]Flag{FlagPassed, FlagReplied}, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -353,7 +387,7 @@ func TestGeneratedKeysAreUnique(t *testing.T) {
 			t.Parallel()
 			total := 5000
 			for i := 0; i < total; i++ {
-				key, err := newKey()
+				key, err := newKey(nil)
 				if err != nil {
 					t.Fatalf("error generating key: %s", err)
 				}
@@ -378,7 +412,7 @@ func TestDifferentSizesOfReaddirChunks(t *testing.T) {
 	}
 
 	for i := 0; i < totalFiles; i++ {
-		makeDelivery(t, dir, fmt.Sprintf("here is message number %d", i))
+		makeDelivery(t, dir, fmt.Sprintf("here is message number %d", i), nil)
 	}
 
 	// grab unseen messages
@@ -426,7 +460,7 @@ func BenchmarkFilename(b *testing.B) {
 
 	// make 5000 deliveries
 	for i := 0; i < 5000; i++ {
-		makeDelivery(b, d, fmt.Sprintf("here is message number %d", i))
+		makeDelivery(b, d, fmt.Sprintf("here is message number %d", i), nil)
 	}
 
 	// grab unseen messages

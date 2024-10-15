@@ -11,8 +11,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync/atomic"
@@ -123,6 +125,7 @@ type Message struct {
 	filename string
 	key      string
 	flags    []Flag
+	attrs    Attributes
 }
 
 // Filename returns the filesystem path to the message's file.
@@ -134,7 +137,11 @@ func (msg *Message) Filename() string {
 
 // Key returns the stable, unique identifier for the message.
 func (msg *Message) Key() string {
-	return msg.key
+	key := msg.key
+	if ext := msg.attrs.String(); ext != "" {
+		key += "," + ext
+	}
+	return key
 }
 
 // Flags returns the message flags.
@@ -194,7 +201,7 @@ func (msg *Message) CopyTo(target Dir) (*Message, error) {
 	}
 	defer src.Close()
 
-	newMsg, dst, err := target.Create(msg.flags)
+	newMsg, dst, err := target.Create(msg.flags, msg.attrs)
 	if err != nil {
 		return nil, err
 	}
@@ -439,7 +446,7 @@ func (d Dir) MessageByKey(key string) (*Message, error) {
 // For the third part of the key (delivery identifier) it uses an internal
 // counter, the process id and a cryptographical random number to ensure
 // uniqueness among messages delivered in the same second.
-func newKey() (string, error) {
+func newKey(attrs Attributes) (string, error) {
 	host, err := os.Hostname()
 	if err != nil {
 		return "", err
@@ -460,6 +467,11 @@ func newKey() (string, error) {
 		bs,
 		host,
 	)
+
+	if ext := attrs.String(); ext != "" {
+		key += "," + ext
+	}
+
 	return key, nil
 }
 
@@ -484,8 +496,8 @@ func (d Dir) Init() error {
 }
 
 // Create inserts a new message into the Maildir.
-func (d Dir) Create(flags []Flag) (*Message, io.WriteCloser, error) {
-	key, err := newKey()
+func (d Dir) Create(flags []Flag, attrs Attributes) (*Message, io.WriteCloser, error) {
+	key, err := newKey(attrs)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -544,20 +556,49 @@ func (d Dir) Clean() error {
 	return nil
 }
 
+// Attributes is a key-value pair of additional values related to the message
+// that can be stored in the file name. They are maildir extensions.
+// Underneath it's a map[string]string, so it's fine to do the following
+//
+//	Attributes(map[string]string{"K1": "V1", "K2": "V2"})
+type Attributes map[string]string
+
+// Get access an attribute value by key
+func (a Attributes) Get(key string) (string, bool) {
+	val, ok := a[key]
+	return val, ok
+}
+
+// Set adds an attribute value given the key
+func (a Attributes) Set(key, val string) {
+	a[key] = val
+}
+
+// String returns the concatenation of all the key-vaule pairs, sorted
+// lexicographycally by the key, formatted as k=v.
+func (a Attributes) String() (stringed string) {
+	kv := make([]string, len(a))
+	for i, k := range slices.Sorted(maps.Keys(a)) {
+		kv[i] = k + "=" + a[k]
+	}
+	return strings.Join(kv, ",")
+}
+
 // Delivery represents an ongoing message delivery to the mailbox. It
 // implements the io.WriteCloser interface. On Close the underlying file is
 // moved/relinked to new.
 //
 // Multiple processes can perform a delivery on the same Maildir concurrently.
 type Delivery struct {
-	file *os.File
-	d    Dir
-	key  string
+	file  *os.File
+	d     Dir
+	key   string
+	attrs Attributes
 }
 
 // NewDelivery creates a new Delivery.
-func NewDelivery(d string) (*Delivery, error) {
-	key, err := newKey()
+func NewDelivery(d string, attrs Attributes) (*Delivery, error) {
+	key, err := newKey(attrs)
 	if err != nil {
 		return nil, err
 	}
