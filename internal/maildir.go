@@ -80,7 +80,10 @@ func parseBasename(basename string) (key string, flags []Flag, err error) {
 	if len(split) < 2 {
 		return "", nil, &MailfileError{basename}
 	}
-	key, info := split[0], split[1]
+	keyWithAttrs, info := split[0], split[1]
+	// NOTE: here we are trimming away any attribute
+	splitKey := strings.SplitN(keyWithAttrs, ",", 1)
+	key = splitKey[0]
 
 	switch {
 	case len(info) < 2, info[1] != ',':
@@ -97,13 +100,21 @@ func parseBasename(basename string) (key string, flags []Flag, err error) {
 	return key, flags, nil
 }
 
-func formatBasename(key string, flags []Flag) string {
+func formatInfo(flags []Flag) string {
 	info := "2,"
 	sort.Sort(flagList(flags))
 	for _, f := range flags {
 		if []rune(info)[len(info)-1] != rune(f) {
 			info += string(f)
 		}
+	}
+	return info
+}
+
+func formatBasename(key string, flags []Flag, attrs Attributes, dynAttrs ...DynAttribute) string {
+	info := formatInfo(flags)
+	if ext := fmtAllAttributes(attrs, dynAttrs...); ext != "" {
+		key += "," + ext
 	}
 	return key + string(separator) + info
 }
@@ -120,6 +131,7 @@ type Message struct {
 	key      string
 	flags    []Flag
 	attrs    Attributes
+	dynAttrs []DynAttribute
 }
 
 // Filename returns the filesystem path to the message's file.
@@ -132,7 +144,7 @@ func (msg *Message) Filename() string {
 // Key returns the stable, unique identifier for the message.
 func (msg *Message) Key() string {
 	key := msg.key
-	if ext := msg.attrs.String(); ext != "" {
+	if ext := fmtAllAttributes(msg.attrs, msg.dynAttrs...); ext != "" {
 		key += "," + ext
 	}
 	return key
@@ -147,7 +159,7 @@ func (msg *Message) Flags() []Flag {
 //
 // Any duplicate flags are dropped, and flags are sorted before being saved.
 func (msg *Message) SetFlags(flags []Flag) error {
-	newBasename := formatBasename(msg.key, flags)
+	newBasename := formatBasename(msg.key, flags, msg.attrs)
 	_, flags, err := parseBasename(newBasename)
 	if err != nil {
 		return err
@@ -164,12 +176,12 @@ func (msg *Message) SetFlags(flags []Flag) error {
 
 // Open reads the contents of a message.
 func (msg *Message) Open() (io.ReadCloser, error) {
-	return os.Open(msg.filename)
+	return os.Open(msg.Filename())
 }
 
 // Remove deletes a message.
 func (msg *Message) Remove() error {
-	return os.Remove(msg.filename)
+	return os.Remove(msg.Filename())
 }
 
 // MoveTo moves a message from this Maildir to another one.
@@ -195,7 +207,7 @@ func (msg *Message) CopyTo(target Dir) (*Message, error) {
 	}
 	defer src.Close()
 
-	newMsg, dst, err := target.Create(msg.flags, msg.attrs)
+	newMsg, dst, err := target.Create(msg.flags, msg.attrs, msg.dynAttrs...)
 	if err != nil {
 		return nil, err
 	}
@@ -212,15 +224,23 @@ func (msg *Message) CopyTo(target Dir) (*Message, error) {
 }
 
 type tmpMessage struct {
-	*os.File
-	dest string
+	file FileLike
+	d    string
+	msg  *Message
+}
+
+func (msg tmpMessage) Write(p []byte) (n int, err error) {
+	return msg.file.Write(p)
 }
 
 func (msg tmpMessage) Close() error {
-	if err := msg.File.Close(); err != nil {
+	if err := msg.file.Close(); err != nil {
 		return err
 	}
-	return os.Rename(msg.File.Name(), msg.dest)
+	info := formatInfo(msg.msg.flags)
+	basename := msg.msg.Key() + string(separator) + info
+	dest := filepath.Join(msg.d, "cur", basename)
+	return os.Rename(msg.file.Name(), dest)
 }
 
 // A Dir represents a single directory in a Maildir mailbox.
@@ -440,7 +460,7 @@ func (d Dir) MessageByKey(key string) (*Message, error) {
 // For the third part of the key (delivery identifier) it uses an internal
 // counter, the process id and a cryptographical random number to ensure
 // uniqueness among messages delivered in the same second.
-func newKey(attrs Attributes) (string, error) {
+func newKey(attrs Attributes, dynAttrs ...DynAttribute) (string, error) {
 	host, err := os.Hostname()
 	if err != nil {
 		return "", err
@@ -462,7 +482,7 @@ func newKey(attrs Attributes) (string, error) {
 		host,
 	)
 
-	if ext := attrs.String(); ext != "" {
+	if ext := fmtAllAttributes(attrs, dynAttrs...); ext != "" {
 		key += "," + ext
 	}
 
@@ -490,7 +510,7 @@ func (d Dir) Init() error {
 }
 
 // Create inserts a new message into the Maildir.
-func (d Dir) Create(flags []Flag, attrs Attributes) (*Message, io.WriteCloser, error) {
+func (d Dir) Create(flags []Flag, attrs Attributes, dynAttrs ...DynAttribute) (*Message, io.WriteCloser, error) {
 	key, err := newKey(attrs)
 	if err != nil {
 		return nil, nil, err
@@ -502,17 +522,26 @@ func (d Dir) Create(flags []Flag, attrs Attributes) (*Message, io.WriteCloser, e
 		return nil, nil, err
 	}
 
-	basename := formatBasename(key, flags)
+	basename := formatBasename(key, flags, attrs)
 	curFilename := filepath.Join(string(d), "cur", basename)
 
 	flagsCopy := make([]Flag, len(flags))
 	copy(flagsCopy, flags)
 
-	return &Message{
+	msg := &Message{
 		filename: curFilename,
 		key:      key,
 		flags:    flagsCopy,
-	}, &tmpMessage{File: f, dest: curFilename}, err
+		attrs:    attrs,
+		dynAttrs: dynAttrs,
+	}
+
+	return msg,
+		&tmpMessage{
+			file: wrapFile(f, dynAttrs...),
+			d:    string(d),
+			msg:  msg,
+		}, err
 }
 
 // Clean removes old files from tmp and should be run periodically.
@@ -578,31 +607,115 @@ func (a Attributes) String() (stringed string) {
 	return strings.Join(kv, ",")
 }
 
+func (a Attributes) copy(n int) Attributes {
+	out := make(map[string]string, len(a)+n)
+	for k, v := range a {
+		out[k] = v
+	}
+	return out
+}
+
+type FileLike interface {
+	io.WriteCloser
+	Name() string
+}
+
+type fileWrapper struct {
+	file     *os.File
+	dynAttrs []DynAttribute
+	writer   io.Writer
+}
+
+func (w *fileWrapper) Name() string {
+	return w.file.Name()
+}
+
+func (w *fileWrapper) Write(p []byte) (n int, err error) {
+	return w.writer.Write(p)
+}
+
+func (w *fileWrapper) Close() error {
+	for _, dynAttr := range w.dynAttrs {
+		if err := dynAttr.Close(); err != nil {
+			return err
+		}
+	}
+	return w.file.Close()
+}
+
+var _ FileLike = &fileWrapper{}
+
+// DynAttribute is a way to dynamically set an attribute that may depend
+// on the message content. Its Compute method must be called on message
+// Close call and the result is assigned to the key returned by the Key method.
+type DynAttribute interface {
+	io.WriteCloser
+	Key() string
+	Compute() string
+}
+
+func wrapFile(file *os.File, dynAttrs ...DynAttribute) FileLike {
+	if len(dynAttrs) == 0 {
+		return file
+	}
+
+	dst := make([]io.Writer, len(dynAttrs)+1)
+	dst[0] = file
+	for i, dynAttr := range dynAttrs {
+		dst[i+1] = dynAttr
+	}
+	writer := io.MultiWriter(dst...)
+
+	return &fileWrapper{
+		file:     file,
+		dynAttrs: dynAttrs,
+		writer:   writer,
+	}
+}
+
+func fmtAllAttributes(attrs Attributes, dynAttrs ...DynAttribute) string {
+	cp := attrs.copy(len(dynAttrs))
+
+	for _, dynAttr := range dynAttrs {
+		cp.Set(dynAttr.Key(), dynAttr.Compute())
+	}
+
+	return cp.String()
+}
+
 // Delivery represents an ongoing message delivery to the mailbox. It
 // implements the io.WriteCloser interface. On Close the underlying file is
 // moved/relinked to new.
 //
 // Multiple processes can perform a delivery on the same Maildir concurrently.
 type Delivery struct {
-	file  *os.File
-	d     Dir
-	key   string
-	attrs Attributes
+	file     FileLike
+	d        Dir
+	key      string
+	attrs    Attributes
+	dynAttrs []DynAttribute
 }
 
 // NewDelivery creates a new Delivery.
-func NewDelivery(d string, attrs Attributes) (*Delivery, error) {
+func NewDelivery(d string, attrs Attributes, dynAttrs ...DynAttribute) (*Delivery, error) {
+	// NOTE: on delivery, we must first create a file in "tmp" and write to it.
+	// Because if this, we cannot add to the filename the result of the dynamic attributes,
+	// that we are here omitting. They will be used when completing the delivery, moving the
+	// file to "new".
 	key, err := newKey(attrs)
 	if err != nil {
 		return nil, err
 	}
-	del := &Delivery{}
+	del := &Delivery{
+		attrs:    attrs,
+		dynAttrs: dynAttrs,
+	}
 	filename := filepath.Join(d, "tmp", key)
 	file, err := os.OpenFile(filename, os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0666)
 	if err != nil {
 		return nil, err
 	}
-	del.file = file
+	del.file = wrapFile(file, dynAttrs...)
 	del.d = Dir(d)
 	del.key = key
 	return del, nil
@@ -620,7 +733,8 @@ func (d *Delivery) Close() error {
 	if err != nil {
 		return err
 	}
-	newfile := filepath.Join(string(d.d), "new", d.key)
+	key, err := newKey(d.attrs, d.dynAttrs...)
+	newfile := filepath.Join(string(d.d), "new", key)
 	if err = os.Rename(tmppath, newfile); err != nil {
 		return err
 	}

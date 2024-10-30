@@ -46,9 +46,26 @@ func cat(t *testing.T, path string) string {
 	return string(c)
 }
 
+// ls returns the list of files in a directory.
+// It errors if the path is not an existing directory.
+func ls(t *testing.T, path string) {
+	t.Log("Listing:", path)
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			t.Logf("d:\t%s/", e.Name())
+		} else {
+			t.Logf("->\t%s", e.Name())
+		}
+	}
+}
+
 // makeDelivery creates a new message
-func makeDelivery(tb testing.TB, d Dir, msg string, attrs Attributes) {
-	del, err := NewDelivery(string(d), attrs)
+func makeDelivery(tb testing.TB, d Dir, msg string, attrs Attributes, dynAttrs ...DynAttribute) {
+	del, err := NewDelivery(string(d), attrs, dynAttrs...)
 	if err != nil {
 		tb.Fatal(err)
 	}
@@ -157,8 +174,41 @@ func TestDeliveryWithAttributes(t *testing.T) {
 	if !exists(path) {
 		t.Fatal("File doesn't exist")
 	}
-	if !strings.Contains(path, "A=randomstring,V=123") {
-		t.Fatal("File name missing attributes")
+	if !strings.HasSuffix(path, "A=randomstring,V=123:2,") {
+		t.Fatal("File name missing attributes:", path)
+	}
+
+	if cat(t, path) != msg {
+		t.Fatal("Content doesn't match")
+	}
+}
+
+func TestDeliveryWithDynAttributes(t *testing.T) {
+	t.Parallel()
+
+	var d Dir = "test_delivery_with_dyn_attrs"
+	err := d.Init()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup(t, d)
+
+	var msg = "this is a message"
+	makeDelivery(t, d, msg, Attributes(map[string]string{
+		"V": "123",
+		"A": "randomstring",
+	}), &byteCountsAttr{})
+
+	msgs, err := d.Unseen()
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := msgs[0].Filename()
+	if !exists(path) {
+		t.Fatal("File doesn't exist")
+	}
+	if !strings.HasSuffix(path, "A=randomstring,C=17,V=123:2,") {
+		t.Fatal("File name missing attributes:", path)
 	}
 
 	if cat(t, path) != msg {
@@ -191,6 +241,105 @@ func TestDir_Create(t *testing.T) {
 
 	msg, err = d.MessageByKey(msg.Key())
 	if err != nil {
+		ls(t, filepath.Join(string(d), "tmp"))
+		ls(t, filepath.Join(string(d), "cur"))
+		ls(t, filepath.Join(string(d), "new"))
+		t.Fatal(err)
+	}
+
+	flags := msg.Flags()
+	if len(flags) != 1 || flags[0] != FlagFlagged {
+		t.Errorf("Dir.Flags() = %v, want {FlagFlagged}", flags)
+	}
+
+	path := msg.Filename()
+	if !exists(path) {
+		t.Fatal("File doesn't exist")
+	}
+	if cat(t, path) != text {
+		t.Fatal("Content doesn't match")
+	}
+}
+
+func TestDir_Create_withAttrs(t *testing.T) {
+	t.Parallel()
+
+	var d Dir = "test_create_with_attrs"
+	err := d.Init()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup(t, d)
+
+	var text = "this is a message"
+	msg, w, err := d.Create([]Flag{FlagFlagged}, Attributes(map[string]string{
+		"V": "123",
+		"A": "randomstring",
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+	if _, err := io.WriteString(w, text); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	msg, err = d.MessageByKey(msg.Key())
+	if err != nil {
+		ls(t, filepath.Join(string(d), "tmp"))
+		ls(t, filepath.Join(string(d), "cur"))
+		ls(t, filepath.Join(string(d), "new"))
+		t.Fatal(err)
+	}
+
+	flags := msg.Flags()
+	if len(flags) != 1 || flags[0] != FlagFlagged {
+		t.Errorf("Dir.Flags() = %v, want {FlagFlagged}", flags)
+	}
+
+	path := msg.Filename()
+	if !exists(path) {
+		t.Fatal("File doesn't exist")
+	}
+	if cat(t, path) != text {
+		t.Fatal("Content doesn't match")
+	}
+}
+
+func TestDir_Create_withDynAttrs(t *testing.T) {
+	t.Parallel()
+
+	var d Dir = "test_create_with_dyn_attrs"
+	err := d.Init()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup(t, d)
+
+	var text = "this is a message"
+	msg, w, err := d.Create([]Flag{FlagFlagged}, Attributes(map[string]string{
+		"V": "123",
+		"A": "randomstring",
+	}), &byteCountsAttr{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+	if _, err := io.WriteString(w, text); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	msg, err = d.MessageByKey(msg.Key())
+	if err != nil {
+		ls(t, filepath.Join(string(d), "tmp"))
+		ls(t, filepath.Join(string(d), "cur"))
+		ls(t, filepath.Join(string(d), "new"))
 		t.Fatal(err)
 	}
 
@@ -511,3 +660,30 @@ func BenchmarkFilename(b *testing.B) {
 		}
 	}
 }
+
+// byteCountsAttr is an example of DynAttribute implementation.
+// It counts the number of bytes in the message, and has them returned
+// as the attribute C= value.
+type byteCountsAttr struct {
+	count int
+}
+
+func (c *byteCountsAttr) Write(p []byte) (n int, err error) {
+	n = len(p)
+	c.count += n
+	return
+}
+
+func (c *byteCountsAttr) Close() error {
+	return nil
+}
+
+func (c *byteCountsAttr) Key() string {
+	return "C"
+}
+
+func (c *byteCountsAttr) Compute() string {
+	return fmt.Sprint(c.count)
+}
+
+var _ DynAttribute = &byteCountsAttr{}
