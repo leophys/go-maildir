@@ -13,6 +13,7 @@ type FlagError = internal.FlagError
 type MailfileError = internal.MailfileError
 type Flag = internal.Flag
 type Attributes = internal.Attributes
+type DynAttribute = internal.DynAttribute
 type Message = internal.Message
 
 // A Dir represents a single directory in a Maildir mailbox.
@@ -29,8 +30,8 @@ func NewDir(d string) *Dir {
 }
 
 // Create inserts a new message into the Maildir.
-func (d *Dir) Create(flags []Flag, attrs Attributes) (*Message, io.WriteCloser, error) {
-	return d.Dir.Create(flags, attrs)
+func (d *Dir) Create(flags []Flag, attrs Attributes, dynAttributes ...DynAttribute) (*Message, io.WriteCloser, error) {
+	return d.Dir.Create(flags, attrs, dynAttributes...)
 }
 
 // Delivery represents an ongoing message delivery to the mailbox. It
@@ -41,6 +42,6 @@ func (d *Dir) Create(flags []Flag, attrs Attributes) (*Message, io.WriteCloser, 
 type Delivery = internal.Delivery
 
 // NewDelivery creates a new Delivery.
-func NewDelivery(d string, attrs Attributes) (*Delivery, error) {
-	return internal.NewDelivery(d, attrs)
+func NewDelivery(d string, attrs Attributes, dynAttributes ...DynAttribute) (*Delivery, error) {
+	return internal.NewDelivery(d, attrs, dynAttributes...)
 }
