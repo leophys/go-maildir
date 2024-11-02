@@ -15,8 +15,18 @@ import (
 type KeyError = internal.KeyError
 type FlagError = internal.FlagError
 type MailfileError = internal.MailfileError
-type Flag = internal.Flag
 type Message = internal.Message
+
+type Flag = internal.Flag
+
+const (
+	FlagPassed  Flag = internal.FlagPassed
+	FlagReplied Flag = internal.FlagReplied
+	FlagSeen    Flag = internal.FlagSeen
+	FlagTrashed Flag = internal.FlagTrashed
+	FlagDraft   Flag = internal.FlagDraft
+	FlagFlagged Flag = internal.FlagFlagged
+)
 
 // A Dir represents a single directory in a Maildir mailbox.
 //
